@@ -23,10 +23,6 @@ WhatsApp and its related names, marks, and logos are trademarks of their respect
 - Auto-update support via GitHub Releases for packaged builds
 - Wayland-oriented WebRTC flags for camera, microphone, and calls support
 
-## Screenshots
-
-Screenshots can be added here before the public release once the final visual presentation is locked in.
-
 ## Requirements
 
 - Linux

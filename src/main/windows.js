@@ -1,10 +1,13 @@
 'use strict';
 
 const {
-  BrowserWindow, Menu, session, shell, Notification, app, dialog
+  BrowserWindow, Menu, session, shell, Notification, app, dialog, nativeImage
 } = require('electron');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { APP_NAME, resolveRuntimeIconPath } = require('./assets');
+const { PNG } = require('pngjs');
+const { APP_EXECUTABLE, APP_NAME, resolveRuntimeIconPath } = require('./assets');
 
 const WHATSAPP_URL = 'https://web.whatsapp.com';
 const TRUSTED_PERMISSION_ORIGINS = new Set([
@@ -24,6 +27,8 @@ class WindowManager {
     this.win    = null;
     this._findBarVisible = false;
     this._pendingDownloadOptions = null;
+    this._unread = 0;
+    this.onUnreadCountChanged = null;
   }
 
   async create () {
@@ -245,6 +250,13 @@ class WindowManager {
     win.webContents.on('did-finish-load', () => {
       const z = this.store.get('zoom');
       if (z !== 1.0) win.webContents.setZoomFactor(z);
+      win.setTitle(APP_NAME);
+    });
+
+    win.webContents.on('page-title-updated', (e, title) => {
+      this._updateUnreadCountFromTitle(title);
+      e.preventDefault();
+      win.setTitle(APP_NAME);
     });
 
     win.webContents.on('render-process-gone', (_e, details) => {
@@ -805,6 +817,15 @@ class WindowManager {
   reload ()         { this.win?.loadURL(WHATSAPP_URL, { userAgent: USER_AGENT }); }
   isVisible ()      { return this.win?.isVisible() ?? false; }
 
+  /** Update the Linux taskbar/window icon unread badge. */
+  setUnreadCount (count) {
+    const normalizedCount = Math.max(0, Number.parseInt(count, 10) || 0);
+    if (this._unread === normalizedCount) return;
+
+    this._unread = normalizedCount;
+    this._applyTaskbarIcon(normalizedCount);
+  }
+
   _saveBounds () {
     if (!this.win || this.win.isMinimized() || this.win.isMaximized()) return;
     this.store.set('windowBounds', this.win.getBounds());
@@ -812,6 +833,182 @@ class WindowManager {
 
   _iconPath (filename) {
     return resolveRuntimeIconPath(filename);
+  }
+
+  _applyTaskbarIcon (count) {
+    if (!this.win || process.platform === 'darwin') return;
+
+    const iconPath = count > 0 ? this._writeRuntimeTaskbarIcon(count) : this._iconPath('icon.png');
+    if (!iconPath) return;
+
+    if (count === 0) this._restoreInstalledTaskbarIcon(iconPath);
+
+    const icon = nativeImage.createFromPath(iconPath);
+    if (!icon.isEmpty()) this.win.setIcon(icon);
+  }
+
+  _updateUnreadCountFromTitle (title) {
+    const match = typeof title === 'string' ? title.match(/^\((\d+)\)/) : null;
+    const count = match ? parseInt(match[1], 10) : 0;
+    this.setUnreadCount(count);
+    this.onUnreadCountChanged?.(count);
+  }
+
+  _writeRuntimeTaskbarIcon (count) {
+    try {
+      const sourceIconPath = this._iconPath('icon.png');
+      if (!sourceIconPath) return null;
+
+      const cacheRoot = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
+      const iconDir = path.join(cacheRoot, 'whatsapp-desktop-linux');
+      const filename = count > 0 ? `icon-unread-${Math.min(count, 99)}.png` : 'icon.png';
+      const iconPath = path.join(iconDir, filename);
+      const image = PNG.sync.read(fs.readFileSync(sourceIconPath));
+
+      this._drawUnreadBadge(image, count);
+      const pngBuffer = PNG.sync.write(image);
+
+      fs.mkdirSync(iconDir, { recursive: true });
+      fs.writeFileSync(iconPath, pngBuffer);
+      this._writeInstalledTaskbarIcon(pngBuffer);
+
+      return iconPath;
+    } catch {
+      return null;
+    }
+  }
+
+  _drawUnreadBadge (image, count) {
+    const size = Math.min(image.width, image.height);
+    const radius = Math.round(size * 0.19);
+    const centerX = image.width - radius - Math.round(size * 0.08);
+    const centerY = image.height - radius - Math.round(size * 0.08);
+    const stroke = Math.max(6, Math.round(size * 0.035));
+
+    this._drawFilledCircle(image, centerX, centerY, radius + stroke, [18, 140, 126, 255]);
+    this._drawFilledCircle(image, centerX, centerY, radius, [255, 255, 255, 255]);
+    this._drawBadgeLabel(image, count > 99 ? '99+' : String(count), centerX, centerY, radius);
+  }
+
+  _drawFilledCircle (image, centerX, centerY, radius, rgba) {
+    const minX = Math.max(0, centerX - radius);
+    const maxX = Math.min(image.width - 1, centerX + radius);
+    const minY = Math.max(0, centerY - radius);
+    const maxY = Math.min(image.height - 1, centerY + radius);
+    const radiusSquared = radius * radius;
+
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        const dx = x - centerX;
+        const dy = y - centerY;
+        if ((dx * dx) + (dy * dy) <= radiusSquared) {
+          this._setPixel(image, x, y, rgba);
+        }
+      }
+    }
+  }
+
+  _drawBadgeLabel (image, label, centerX, centerY, radius) {
+    const segmentsByChar = {
+      '0': 'abcdef',
+      '1': 'bc',
+      '2': 'abged',
+      '3': 'abgcd',
+      '4': 'fgbc',
+      '5': 'afgcd',
+      '6': 'afgecd',
+      '7': 'abc',
+      '8': 'abcdefg',
+      '9': 'abfgcd'
+    };
+    const color = [7, 94, 84, 255];
+    const chars = [...label];
+    const digitW = Math.round(radius * 0.48);
+    const digitH = Math.round(radius * 0.9);
+    const gap = Math.round(radius * 0.12);
+    const plusW = Math.round(radius * 0.35);
+    const totalW = chars.reduce((sum, char) => sum + (char === '+' ? plusW : digitW), 0) + gap * (chars.length - 1);
+    let x = Math.round(centerX - totalW / 2);
+    const y = Math.round(centerY - digitH / 2);
+
+    for (const char of chars) {
+      if (char === '+') {
+        this._drawPlus(image, x, y, plusW, digitH, color);
+        x += plusW + gap;
+        continue;
+      }
+
+      this._drawSevenSegmentDigit(image, x, y, digitW, digitH, segmentsByChar[char] || '', color);
+      x += digitW + gap;
+    }
+  }
+
+  _drawSevenSegmentDigit (image, x, y, w, h, segments, color) {
+    const t = Math.max(4, Math.round(w * 0.18));
+    const midY = y + Math.round((h - t) / 2);
+    const bottomY = y + h - t;
+    const rightX = x + w - t;
+
+    const rects = {
+      a: [x + t, y, w - (2 * t), t],
+      b: [rightX, y + t, t, Math.round(h / 2) - t],
+      c: [rightX, midY + t, t, Math.round(h / 2) - t],
+      d: [x + t, bottomY, w - (2 * t), t],
+      e: [x, midY + t, t, Math.round(h / 2) - t],
+      f: [x, y + t, t, Math.round(h / 2) - t],
+      g: [x + t, midY, w - (2 * t), t]
+    };
+
+    for (const segment of segments) {
+      this._drawRect(image, ...rects[segment], color);
+    }
+  }
+
+  _drawPlus (image, x, y, w, h, color) {
+    const t = Math.max(4, Math.round(w * 0.24));
+    this._drawRect(image, x + Math.round((w - t) / 2), y + Math.round(h * 0.18), t, Math.round(h * 0.64), color);
+    this._drawRect(image, x, y + Math.round((h - t) / 2), w, t, color);
+  }
+
+  _drawRect (image, x, y, w, h, color) {
+    for (let yy = Math.max(0, y); yy < Math.min(image.height, y + h); yy++) {
+      for (let xx = Math.max(0, x); xx < Math.min(image.width, x + w); xx++) {
+        this._setPixel(image, xx, yy, color);
+      }
+    }
+  }
+
+  _setPixel (image, x, y, rgba) {
+    const idx = ((image.width * y) + x) << 2;
+    image.data[idx] = rgba[0];
+    image.data[idx + 1] = rgba[1];
+    image.data[idx + 2] = rgba[2];
+    image.data[idx + 3] = rgba[3];
+  }
+
+  _writeInstalledTaskbarIcon (pngBuffer) {
+    for (const iconPath of this._installedTaskbarIconPaths()) {
+      try {
+        fs.mkdirSync(path.dirname(iconPath), { recursive: true });
+        fs.writeFileSync(iconPath, pngBuffer);
+      } catch {}
+    }
+  }
+
+  _restoreInstalledTaskbarIcon (sourceIconPath) {
+    for (const iconPath of this._installedTaskbarIconPaths()) {
+      try {
+        fs.mkdirSync(path.dirname(iconPath), { recursive: true });
+        fs.copyFileSync(sourceIconPath, iconPath);
+      } catch {}
+    }
+  }
+
+  _installedTaskbarIconPaths () {
+    return [
+      path.join(os.homedir(), '.local', 'share', 'icons', 'hicolor', '256x256', 'apps', `${APP_EXECUTABLE}.png`),
+      path.join(os.homedir(), '.local', 'share', 'icons', 'hicolor', '512x512', 'apps', `${APP_EXECUTABLE}.png`)
+    ];
   }
 
   _notify (title, body) {

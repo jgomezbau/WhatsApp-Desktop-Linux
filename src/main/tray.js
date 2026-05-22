@@ -37,10 +37,12 @@ class TrayManager {
 
   /** Update unread badge count. */
   setUnreadCount (count) {
-    if (this._unread === count) return;
-    this._unread = count;
-    this._applyBadge(count);
-    if (this.tray) this.tray.setImage(this._icon(count > 0));
+    const normalizedCount = Math.max(0, Number.parseInt(count, 10) || 0);
+    if (this._unread === normalizedCount) return;
+
+    this._unread = normalizedCount;
+    this._applyBadge(normalizedCount);
+    if (this.tray) this.tray.setImage(this._icon(normalizedCount > 0));
   }
 
   // ─── Private ─────────────────────────────────────────────────────────────

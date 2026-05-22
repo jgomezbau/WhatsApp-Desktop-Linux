@@ -39,7 +39,7 @@ Object.defineProperty(DesktopNotification, 'permission', {
 window.Notification = DesktopNotification;
 
 // ── Unread count ──────────────────────────────────────────────────────────
-let lastCount = 0;
+let lastCount = null;
 function sendCount () {
   const m = document.title.match(/^\((\d+)\)/);
   const n = m ? parseInt(m[1], 10) : 0;
@@ -47,7 +47,14 @@ function sendCount () {
 }
 window.addEventListener('DOMContentLoaded', () => {
   const titleEl = document.querySelector('title');
-  if (titleEl) new MutationObserver(sendCount).observe(titleEl, { childList: true });
+  if (titleEl) {
+    new MutationObserver(sendCount).observe(titleEl, {
+      childList: true,
+      characterData: true,
+      subtree: true
+    });
+  }
+  setInterval(sendCount, 1000);
   sendCount();
 });
 

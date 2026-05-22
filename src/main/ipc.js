@@ -14,6 +14,7 @@ const { resolveRuntimeIconPath } = require('./assets');
  * @param {import('./store').Store} store
  */
 function setupIPC (wm, tm, store) {
+  wm.onUnreadCountChanged = (count) => tm.setUnreadCount(count);
 
   // ── Notifications ─────────────────────────────────────────────────────────
   ipcMain.on('show-notification', (_e, { title, options = {} }) => {
@@ -35,6 +36,7 @@ function setupIPC (wm, tm, store) {
   // ── Unread badge ──────────────────────────────────────────────────────────
   ipcMain.on('unread-count', (_e, count) => {
     tm.setUnreadCount(count);
+    wm.setUnreadCount(count);
   });
 
   // ── Find in page ──────────────────────────────────────────────────────────
